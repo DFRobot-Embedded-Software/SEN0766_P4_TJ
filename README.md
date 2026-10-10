@@ -1,8 +1,8 @@
 # 组件说明
 
-ESP32-P4 从机侧的四个组件。`peer_frame` 管帧格式，`peer_slave` 管 UART，`peer_event` 管进出房、进出区和环境边沿，`es7210_mic` 管双麦。第三方代码在 `managed_components`，不在这里。
+ESP32-P4 从机侧的组件。`peer_frame` 管帧格式，`peer_slave` 管 UART，`peer_event` 管进出房、进出区和环境边沿，`peer_model` 管分区融合推理，`es7210_mic` 管双麦。第三方代码在 `managed_components`，不在这里。
 
-依赖关系：`main` → `peer_slave`、`peer_event`、`es7210_mic`。`peer_slave` 和 `peer_event` 都依赖 `peer_frame`。事件判定不打开串口，串口不解释快照。
+依赖关系：`main` → `peer_slave`、`peer_event`、`peer_model`。`peer_model` 独占麦克风。`peer_slave` 和 `peer_event` 都依赖 `peer_frame`。事件判定不打开串口，串口不解释快照。
 
 ## 怎么串起来
 
@@ -12,6 +12,11 @@ ESP32-P4 从机侧的四个组件。`peer_frame` 管帧格式，`peer_slave` 管
 static void on_peer_rx(uint8_t msg_type, const uint8_t *payload, uint16_t len, uint8_t seq, void *user)
 {
     peer_event_on_rx(msg_type, payload, len, seq, user);
+    if (msg_type == PEER_MSG_SNAPSHOT && len == sizeof(peer_snapshot_t)) {
+        peer_snapshot_t snap;
+        memcpy(&snap, payload, sizeof(snap));
+        peer_model_submit(&snap);
+    }
 }
 
 static const peer_slave_sink_t sink = {
@@ -26,7 +31,7 @@ peer_slave_start(&sink);
 
 主机（S3）周期做三件事：有待发配置就先发 `0x11`，再发 `0x10`，然后等 50 ms。从机不在这个节拍里阻塞。收到 `0x10` 后，队列里有事件才主动发 `0x20`。
 
-`on_rx` 里的 `payload` 只在回调返回前有效。还要把快照交给别的模块时，在 `on_peer_rx` 里再拷一份，不要从事件组件里直接写 UART。
+`on_rx` 里的 `payload` 只在回调返回前有效。`0x10` 在事件组件之后交给 `peer_model_submit`，由它拷贝。麦由 `peer_model` 独占，不要再从 `main` 读 I2S。不要从事件组件里直接写 UART。
 
 ## 接线
 
@@ -127,10 +132,16 @@ UART 收发。扫到 `0x10` / `0x11` 后调用 `on_rx`。`0x10` 处理完立刻�
 | 4 | `zone_return` |
 | 5 | `environment_threshold_crossed` |
 | 6 | `environment_recovered` |
+| 7 | `resting` |
+| 8 | `sleep` |
+| 9 | `resting_bed` |
+| 10 | `sleep_in_night_bed` |
+| 11 | `wake_up_in_night_bed` |
+| 12 | `empty_bed` |
 
-新增事件时在 `peer_event_map` 表尾加一行，编号不要复用，再在 `peer_judge.c` 里加判定。线上英文名只从这张表取。
+7–12 是融合模型的第一名。只在该类相对该区上一拍变化时出现，帧长仍是 136。新增事件时在 `peer_event_map` 表尾加一行，编号不要复用。线上英文名只从这张表取。
 
-队列最多 8 条。满了丢掉最新的一条。每条都是完整的 136 字节 `0x20`，一帧 `0x10` 里可以连续发出多条。
+队列最多 24 条。满了丢掉最新的一条。每条都是完整的 136 字节 `0x20`，一帧 `0x10` 里可以连续发出多条。
 
 自检可以在 PC 上跑，不烧板：
 
@@ -142,11 +153,18 @@ gcc -std=c11 -I components/peer_frame/include -I components/peer_event/include ^
 test_peer_judge.exe
 ```
 
-打印 `ok` 即通过。
+打印 `ok` 即通过。秒窗口另有一条，同样不链接模型：
+
+```text
+gcc -std=c11 -I components/peer_frame/include -I components/peer_event/include -I components/peer_model/include ^
+  components/peer_event/peer_event_map.c components/peer_model/peer_model_window.c ^
+  components/peer_model/test_peer_model_window.c -o test_peer_model_window.exe
+test_peer_model_window.exe
+```
 
 ## 编译
 
-依赖只有 `components/es7210_mic` 声明的 `espressif/esp_codec_dev`。`managed_components/` 和 `build/` 不入库，第一次编译会重新下载：
+`es7210_mic` 依赖 `espressif/esp_codec_dev`。`peer_model` 依赖 TFLite Micro 1.4.0、ESP-DSP 1.8.2、ESP-NN 1.3.2。`managed_components/` 和 `build/` 不入库，第一次编译会重新下载：
 
 ```text
 idf.py set-target esp32p4
