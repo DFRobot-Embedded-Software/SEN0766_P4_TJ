@@ -534,7 +534,8 @@ bool peer_judge_selfcheck(void)
         sizeof(peer_env_cfg_t) != 26) {
         return false;
     }
-    if (peer_evt_map_n != 6 ||
+    /* 1–6 是边沿，7–12 是模型类名。条数变了说明表和枚举没一起改。 */
+    if (peer_evt_map_n != 12 ||
         peer_evt_wire_name(PEER_EVT_ID_ROOM_ENTRY) == NULL ||
         strcmp(peer_evt_wire_name(PEER_EVT_ID_ROOM_ENTRY), "room_entry") != 0) {
         return false;
@@ -761,6 +762,15 @@ bool peer_judge_selfcheck(void)
     s.people_room = 0;
     peer_judge_on_snapshot(&s);
     if (peer_judge_pop(&ev)) {
+        return false;
+    }
+    /* 模型 6 类只在第一名变化时入队，名字必须和映射表一致。 */
+    if (strcmp(peer_evt_wire_name(PEER_EVT_ID_RESTING), "resting") != 0 ||
+        strcmp(peer_evt_wire_name(PEER_EVT_ID_SLEEP), "sleep") != 0 ||
+        strcmp(peer_evt_wire_name(PEER_EVT_ID_RESTING_BED), "resting_bed") != 0 ||
+        strcmp(peer_evt_wire_name(PEER_EVT_ID_SLEEP_IN_NIGHT_BED), "sleep_in_night_bed") != 0 ||
+        strcmp(peer_evt_wire_name(PEER_EVT_ID_WAKE_UP_IN_NIGHT_BED), "wake_up_in_night_bed") != 0 ||
+        strcmp(peer_evt_wire_name(PEER_EVT_ID_EMPTY_BED), "empty_bed") != 0) {
         return false;
     }
     peer_judge_reset();
