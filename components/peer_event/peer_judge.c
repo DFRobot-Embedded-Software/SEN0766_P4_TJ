@@ -9,7 +9,12 @@
 
 #include <string.h>
 
-#define Q_MAX 8   /**< 一拍最多几条事件。满了丢最新的，避免把更早的进出房挤掉。 */
+#if defined(ESP_PLATFORM)
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#endif
+
+#define Q_MAX 24  /**< 边沿和模型事件共用。满了丢最新的，避免挤掉更早的进出房。 */
 #define CH_N  5
 
 /** 与 k_ch_name、mask 的 bit 顺序一致：0 CO₂、1 温度、2 湿度、3 照度、4 声级。 */
@@ -74,17 +79,60 @@ static bool s_in_bad[CH_N];
 /** 雷达未就绪，或主机长时间没发 0x10。只挡住占用事件。 */
 static bool s_frozen;
 
-/** 待发 0x20。UART 写完才 pop。 */
+/** 待发 0x20。UART 写完才 pop。模型任务也会入队，所以设备上要加锁。 */
 static peer_event_t s_q[Q_MAX];
 static int s_q_n;
 
-/** 入队。满了丢这一条，不挤掉队头。 */
-static void push(const peer_event_t *ev)
+#if defined(ESP_PLATFORM)
+static SemaphoreHandle_t s_q_mu;
+
+/** 设备上保护队列。首次上锁时创建。PC 自检是单线程，不编译这段。 */
+static void q_lock(void)
+{
+    if (s_q_mu == NULL) {
+        s_q_mu = xSemaphoreCreateMutex();
+    }
+    xSemaphoreTake(s_q_mu, portMAX_DELAY);
+}
+
+static void q_unlock(void)
+{
+    xSemaphoreGive(s_q_mu);
+}
+#else
+static void q_lock(void) {}
+static void q_unlock(void) {}
+#endif
+
+/** 调用方已持有队列锁。满了直接返回。 */
+static void push_unlocked(const peer_event_t *ev)
 {
     if (s_q_n >= Q_MAX) {
-        return; /* ponytail: 队列满则丢最新。一周期只回一条，正常排得开。 */
+        return; /* ponytail: 队列满则丢最新。模型一拍最多 16 条，24 仍可能被边沿挤满。 */
     }
     s_q[s_q_n++] = *ev;
+}
+
+/** 边沿判定内部入队。满了丢这一条。 */
+static void push(const peer_event_t *ev)
+{
+    q_lock();
+    push_unlocked(ev);
+    q_unlock();
+}
+
+bool peer_judge_push(const peer_event_t *ev)
+{
+    if (ev == NULL) {
+        return false;
+    }
+    q_lock();
+    bool ok = s_q_n < Q_MAX;
+    if (ok) {
+        push_unlocked(ev);
+    }
+    q_unlock();
+    return ok;
 }
 
 /**
@@ -421,9 +469,10 @@ static void on_env(const peer_snapshot_t *snap)
     }
 }
 
-/** 回到上电状态：默认阈值、无基线、队列空。 */
+/** 回到上电状态：默认阈值、无基线、队列空。和模型入队共用一把锁。 */
 void peer_judge_reset(void)
 {
+    q_lock();
     s_cfg = default_cfg();
     memset(&s_cfg_wait, 0, sizeof(s_cfg_wait));
     s_cfg_pending = false;
@@ -434,6 +483,7 @@ void peer_judge_reset(void)
     memset(s_in_bad, 0, sizeof(s_in_bad));
     s_frozen = false;
     s_q_n = 0;
+    q_unlock();
 }
 
 /** 只暂存。和当前阈值相同也会再记一次，下一帧快照仍用新规则比边沿。 */
@@ -482,31 +532,38 @@ void peer_judge_on_snapshot(const peer_snapshot_t *snap)
     on_env(snap);
 }
 
-/** 看队头，给组 0x20 用。 */
+/** 看队头，给组 0x20 用。不出队。 */
 bool peer_judge_peek(peer_event_t *out)
 {
-    if (out == NULL || s_q_n == 0) {
-        return false;
+    q_lock();
+    bool ok = out != NULL && s_q_n != 0;
+    if (ok) {
+        *out = s_q[0];
     }
-    *out = s_q[0];
-    return true;
+    q_unlock();
+    return ok;
 }
 
 /** 0x20 已写出后出队。后面的事件前移。 */
 bool peer_judge_pop(peer_event_t *out)
 {
-    if (out == NULL || s_q_n == 0) {
-        return false;
+    q_lock();
+    bool ok = out != NULL && s_q_n != 0;
+    if (ok) {
+        *out = s_q[0];
+        memmove(&s_q[0], &s_q[1], (size_t)(s_q_n - 1) * sizeof(s_q[0]));
+        s_q_n--;
     }
-    *out = s_q[0];
-    memmove(&s_q[0], &s_q[1], (size_t)(s_q_n - 1) * sizeof(s_q[0]));
-    s_q_n--;
-    return true;
+    q_unlock();
+    return ok;
 }
 
 int peer_judge_queue_len(void)
 {
-    return s_q_n;
+    q_lock();
+    int n = s_q_n;
+    q_unlock();
+    return n;
 }
 
 static peer_snapshot_t blank(void)
@@ -771,6 +828,23 @@ bool peer_judge_selfcheck(void)
         strcmp(peer_evt_wire_name(PEER_EVT_ID_SLEEP_IN_NIGHT_BED), "sleep_in_night_bed") != 0 ||
         strcmp(peer_evt_wire_name(PEER_EVT_ID_WAKE_UP_IN_NIGHT_BED), "wake_up_in_night_bed") != 0 ||
         strcmp(peer_evt_wire_name(PEER_EVT_ID_EMPTY_BED), "empty_bed") != 0) {
+        return false;
+    }
+    /* 模型任务和边沿共用 24 条队列。满了丢掉新的，队头还是第一条。 */
+    peer_judge_reset();
+    peer_event_t pushed;
+    memset(&pushed, 0, sizeof(pushed));
+    memcpy(pushed.event_type, "resting", 8);
+    for (int i = 0; i < 24; i++) {
+        if (!peer_judge_push(&pushed)) {
+            return false;
+        }
+    }
+    if (peer_judge_push(&pushed) || peer_judge_queue_len() != 24) {
+        return false;
+    }
+    peer_event_t head;
+    if (!peer_judge_peek(&head) || strcmp(head.event_type, "resting") != 0) {
         return false;
     }
     peer_judge_reset();
