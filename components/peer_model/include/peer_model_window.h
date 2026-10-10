@@ -11,6 +11,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /** 一次推理里，一个已经满 10 秒的区。环境行和 epoch 各区相同。 */
 typedef struct {
     int32_t zone_id;
@@ -65,3 +69,7 @@ bool peer_model_window_event(int32_t zone_id, int class_index, peer_event_t *ev)
 
 /** 只有 peer_judge_push 成功之后才调用。入队失败不要调用，下一拍还会再试。 */
 void peer_model_window_event_sent(int32_t zone_id, int class_index);
+
+#ifdef __cplusplus
+}
+#endif

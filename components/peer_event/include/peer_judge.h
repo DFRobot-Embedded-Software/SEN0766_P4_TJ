@@ -17,6 +17,10 @@
 #include "peer_frame.h"
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /** 清空轨迹、环境坏区标记和事件队列，阈值回到文档默认值。 */
 void peer_judge_reset(void);
 
@@ -46,3 +50,7 @@ int peer_judge_queue_len(void);
 
 /** 尺寸、CRC 向量、进出房/区、环境边沿、流式拆帧。失败返回 false。 */
 bool peer_judge_selfcheck(void);
+
+#ifdef __cplusplus
+}
+#endif
