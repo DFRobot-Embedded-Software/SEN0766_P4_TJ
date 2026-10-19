@@ -1,7 +1,8 @@
 #pragma once
 
 /**
- * 边沿判定，只给 peer_event 用。
+ * 边沿判定给 peer_event 用。
+ * 模型任务只通过 peer_judge_push 把一条 0x20 放进同一队列。
  * 线上英文名一律从 peer_event_map 查，这里不要写死 "room_entry" 这类字符串。
  *
  * 占用：people_room 从 0 变正数报进房，从正数变 0 报离房。
@@ -15,6 +16,10 @@
 #include "peer_event_map.h"
 #include "peer_frame.h"
 #include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /** 清空轨迹、环境坏区标记和事件队列，阈值回到文档默认值。 */
 void peer_judge_reset(void);
@@ -34,8 +39,18 @@ bool peer_judge_peek(peer_event_t *out);
 /** 弹出队头。空队列返回 false。 */
 bool peer_judge_pop(peer_event_t *out);
 
+/**
+ * 模型任务入队一条已经填好的事件。
+ * 满了返回 false，队头保持不变。ev 只在本次调用内读取。
+ */
+bool peer_judge_push(const peer_event_t *ev);
+
 /** 队列里还没发出去的事件条数。 */
 int peer_judge_queue_len(void);
 
 /** 尺寸、CRC 向量、进出房/区、环境边沿、流式拆帧。失败返回 false。 */
 bool peer_judge_selfcheck(void);
+
+#ifdef __cplusplus
+}
+#endif

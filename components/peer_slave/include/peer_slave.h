@@ -25,11 +25,11 @@
 #endif
 /** 本板发送脚，接到 S3 的 RX。 */
 #ifndef PEER_UART_TX
-#define PEER_UART_TX 30
+#define PEER_UART_TX 8
 #endif
 /** 本板接收脚，接到 S3 的 TX。 */
 #ifndef PEER_UART_RX
-#define PEER_UART_RX 29
+#define PEER_UART_RX 7
 #endif
 /** 板对板短线默认 3 Mbps。 */
 #ifndef PEER_UART_BAUD

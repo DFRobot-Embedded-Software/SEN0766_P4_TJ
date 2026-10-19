@@ -1,8 +1,8 @@
 # 组件说明
 
-ESP32-P4 从机侧的四个组件。`peer_frame` 管帧格式，`peer_slave` 管 UART，`peer_event` 管进出房、进出区和环境边沿，`es7210_mic` 管双麦。第三方代码在 `managed_components`，不在这里。
+ESP32-P4 从机侧的组件。`peer_frame` 管帧格式，`peer_slave` 管 UART，`peer_event` 管进出房、进出区和环境边沿，`peer_model` 管分区融合推理，`es7243e_mic` 管单声道麦。第三方代码在 `managed_components`，不在这里。
 
-依赖关系：`main` → `peer_slave`、`peer_event`、`es7210_mic`。`peer_slave` 和 `peer_event` 都依赖 `peer_frame`。事件判定不打开串口，串口不解释快照。
+依赖关系：`main` → `peer_slave`、`peer_event`、`peer_model`。`peer_model` 独占麦克风。`peer_slave` 和 `peer_event` 都依赖 `peer_frame`。事件判定不打开串口，串口不解释快照。
 
 ## 怎么串起来
 
@@ -12,6 +12,11 @@ ESP32-P4 从机侧的四个组件。`peer_frame` 管帧格式，`peer_slave` 管
 static void on_peer_rx(uint8_t msg_type, const uint8_t *payload, uint16_t len, uint8_t seq, void *user)
 {
     peer_event_on_rx(msg_type, payload, len, seq, user);
+    if (msg_type == PEER_MSG_SNAPSHOT && len == sizeof(peer_snapshot_t)) {
+        peer_snapshot_t snap;
+        memcpy(&snap, payload, sizeof(snap));
+        peer_model_submit(&snap);
+    }
 }
 
 static const peer_slave_sink_t sink = {
@@ -26,17 +31,18 @@ peer_slave_start(&sink);
 
 主机（S3）周期做三件事：有待发配置就先发 `0x11`，再发 `0x10`，然后等 50 ms。从机不在这个节拍里阻塞。收到 `0x10` 后，队列里有事件才主动发 `0x20`。
 
-`on_rx` 里的 `payload` 只在回调返回前有效。还要把快照交给别的模块时，在 `on_peer_rx` 里再拷一份，不要从事件组件里直接写 UART。
+`on_rx` 里的 `payload` 只在回调返回前有效。`0x10` 在事件组件之后交给 `peer_model_submit`，由它拷贝。麦由 `peer_model` 独占，不要再从 `main` 读 I2S。不要从事件组件里直接写 UART。
 
 ## 接线
 
 | 信号 | P4 | 对端 |
 |------|----|------|
+| 调试 TX | GPIO25 | USB 转串口 RX |
 | 业务 TX | GPIO30 | S3 RX |
 | 业务 RX | GPIO29 | S3 TX |
-| 麦 | GPIO1–6 | ES7210 |
+| 麦 | GPIO1–6 | ES7243E |
 
-业务口默认 `UART_NUM_1`，8N1，无流控，3 Mbps。控制台占 `UART0`，不要把业务口改成它。CRC 在短线上频繁失败时，只把 `PEER_UART_BAUD` 改成 `921600`，帧格式不变。引脚和波特率都是头文件宏，没有 Kconfig。
+业务口默认 `UART_NUM_1`，8N1，无流控，3 Mbps。调试日志走 `UART0` TX（GPIO25），115200，8N1，只出不进。不要把业务口改成 `UART0`。CRC 在短线上频繁失败时，只把 `PEER_UART_BAUD` 改成 `921600`，帧格式不变。业务口引脚和波特率是头文件宏；调试口在 `sdkconfig`。
 
 ## peer_frame
 
@@ -127,10 +133,16 @@ UART 收发。扫到 `0x10` / `0x11` 后调用 `on_rx`。`0x10` 处理完立刻�
 | 4 | `zone_return` |
 | 5 | `environment_threshold_crossed` |
 | 6 | `environment_recovered` |
+| 7 | `resting` |
+| 8 | `sleep` |
+| 9 | `resting_bed` |
+| 10 | `sleep_in_night_bed` |
+| 11 | `wake_up_in_night_bed` |
+| 12 | `empty_bed` |
 
-新增事件时在 `peer_event_map` 表尾加一行，编号不要复用，再在 `peer_judge.c` 里加判定。线上英文名只从这张表取。
+7–12 是融合模型的第一名。只在该类相对该区上一拍变化时出现，帧长仍是 136。新增事件时在 `peer_event_map` 表尾加一行，编号不要复用。线上英文名只从这张表取。
 
-队列最多 8 条。满了丢掉最新的一条。每条都是完整的 136 字节 `0x20`，一帧 `0x10` 里可以连续发出多条。
+队列最多 24 条。满了丢掉最新的一条。每条都是完整的 136 字节 `0x20`，一帧 `0x10` 里可以连续发出多条。
 
 自检可以在 PC 上跑，不烧板：
 
@@ -142,11 +154,18 @@ gcc -std=c11 -I components/peer_frame/include -I components/peer_event/include ^
 test_peer_judge.exe
 ```
 
-打印 `ok` 即通过。
+打印 `ok` 即通过。秒窗口另有一条，同样不链接模型：
+
+```text
+gcc -std=c11 -I components/peer_frame/include -I components/peer_event/include -I components/peer_model/include ^
+  components/peer_event/peer_event_map.c components/peer_model/peer_model_window.c ^
+  components/peer_model/test_peer_model_window.c -o test_peer_model_window.exe
+test_peer_model_window.exe
+```
 
 ## 编译
 
-依赖只有 `components/es7210_mic` 声明的 `espressif/esp_codec_dev`。`managed_components/` 和 `build/` 不入库，第一次编译会重新下载：
+`es7243e_mic` 依赖 `espressif/esp_codec_dev`。`peer_model` 依赖 TFLite Micro 1.4.0、ESP-DSP 1.8.2、ESP-NN 1.3.2。`managed_components/` 和 `build/` 不入库，第一次编译会重新下载：
 
 ```text
 idf.py set-target esp32p4
@@ -155,14 +174,14 @@ idf.py build
 
 目标芯片已写在 `sdkconfig` 里。本机 ESP-IDF 路径不要提交。
 
-## es7210_mic
+## es7243e_mic
 
-双麦采集，和业务 UART 无关。P4 做 I2S 主机，输出 MCLK、BCLK、LRCK；ES7210 做从机，从 SDO 送 PCM。I2C 只写寄存器，8 位地址按芯片默认（AD1/AD0 = 00）。
+单声道采集，和业务 UART 无关。P4 做 I2S 主机，输出 MCLK、BCLK、LRCK；ES7243E 做从机，从 SDO 送 PCM。I2C 只写寄存器，8 位地址按芯片默认（CE = 0，即 `0x20`）。
 
-采样 16 kHz、16 bit、立体声。MIC1 是左声道，MIC2 是右声道。`es7210_mic_read` 读出的是交错 `int16`，左声道在前，`len` 必须是 4 的倍数。
+采样 16 kHz、16 bit、单声道。标准 I2S 总线仍是左右两槽，DMA 只收左槽。`es7243e_mic_read` 读出的是单声道 `int16`，`len` 必须是 2 的倍数。
 
 ```c
-static const es7210_mic_pins_t pins = {
+static const es7243e_mic_pins_t pins = {
     .sda = GPIO_NUM_1,
     .scl = GPIO_NUM_2,
     .sdo = GPIO_NUM_3,
@@ -170,9 +189,9 @@ static const es7210_mic_pins_t pins = {
     .lrck = GPIO_NUM_5,
     .mclk = GPIO_NUM_6,
 };
-es7210_mic_init(&pins);
-es7210_mic_read(pcm, sizeof(pcm));
-es7210_mic_deinit();
+es7243e_mic_init(&pins);
+es7243e_mic_read(pcm, sizeof(pcm));
+es7243e_mic_deinit();
 ```
 
-未接芯片时 `es7210_mic_init` 会失败，调用方应隔一段时间重试，不要用会复位的 `ESP_ERROR_CHECK` 包住它。重复 `init` 返回 `ESP_ERR_INVALID_STATE`。增益在打开采集之后设到 37.5 dB，这是芯片 PGA 的上限。
+未接芯片时 `es7243e_mic_init` 会失败，调用方应隔一段时间重试，不要用会复位的 `ESP_ERROR_CHECK` 包住它。重复 `init` 返回 `ESP_ERR_INVALID_STATE`。增益在打开采集之后设到 37.5 dB，这是芯片 PGA 的上限。

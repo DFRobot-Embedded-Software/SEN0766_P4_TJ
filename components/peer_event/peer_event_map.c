@@ -3,6 +3,7 @@
 /**
  * 0x20 的 event_type 只从这张表取。
  * 编号已经发给主机的不要改、不要复用。新增事件在表尾加一行，并在判定里加分支。
+ * 末尾 6 个是模型第一名类名，只在类名变化时由 peer_model 入队。
  */
 const peer_evt_map_row_t peer_evt_map[] = {
     {PEER_EVT_ID_ROOM_ENTRY, "room_entry"},
@@ -11,6 +12,12 @@ const peer_evt_map_row_t peer_evt_map[] = {
     {PEER_EVT_ID_ZONE_RETURN, "zone_return"},
     {PEER_EVT_ID_ENV_CROSSED, "environment_threshold_crossed"},
     {PEER_EVT_ID_ENV_RECOVERED, "environment_recovered"},
+    {PEER_EVT_ID_RESTING, "resting"},
+    {PEER_EVT_ID_SLEEP, "sleep"},
+    {PEER_EVT_ID_RESTING_BED, "resting_bed"},
+    {PEER_EVT_ID_SLEEP_IN_NIGHT_BED, "sleep_in_night_bed"},
+    {PEER_EVT_ID_WAKE_UP_IN_NIGHT_BED, "wake_up_in_night_bed"},
+    {PEER_EVT_ID_EMPTY_BED, "empty_bed"},
 };
 
 const unsigned peer_evt_map_n = sizeof(peer_evt_map) / sizeof(peer_evt_map[0]);

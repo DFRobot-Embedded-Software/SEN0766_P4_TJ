@@ -132,9 +132,16 @@ typedef struct {
 } peer_event_t;
 #pragma pack(pop)
 
+/* C 用 _Static_assert。模型任务是 C++，只认 static_assert。 */
+#ifdef __cplusplus
+static_assert(sizeof(peer_snapshot_t) == 393, "peer_snapshot_t");
+static_assert(sizeof(peer_env_cfg_t) == 26, "peer_env_cfg_t");
+static_assert(sizeof(peer_event_t) == 136, "peer_event_t");
+#else
 _Static_assert(sizeof(peer_snapshot_t) == 393, "peer_snapshot_t");
 _Static_assert(sizeof(peer_env_cfg_t) == 26, "peer_env_cfg_t");
 _Static_assert(sizeof(peer_event_t) == 136, "peer_event_t");
+#endif
 
 /** 覆盖 data[0..len)。结果小端放在帧尾。 */
 uint16_t peer_crc16(const uint8_t *data, size_t len);

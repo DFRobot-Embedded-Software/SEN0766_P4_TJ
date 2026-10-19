@@ -8,6 +8,14 @@
  *   4 zone_return
  *   5 environment_threshold_crossed
  *   6 environment_recovered
+ *   7 resting
+ *   8 sleep
+ *   9 resting_bed
+ *   10 sleep_in_night_bed
+ *   11 wake_up_in_night_bed
+ *   12 empty_bed
+ *
+ * 7–12 是融合模型的第一名类名。只在该类相对该区上一拍变化时入队，编号不要复用。
  *
  * 判定代码只引用编号。回包 ASCII 从本表查出。新增事件：加枚举、加一行表、再写判定分支。
  */
@@ -21,7 +29,13 @@ typedef enum {
     PEER_EVT_ID_ZONE_EXIT = 3,
     PEER_EVT_ID_ZONE_RETURN = 4,
     PEER_EVT_ID_ENV_CROSSED = 5,
-    PEER_EVT_ID_ENV_RECOVERED = 6
+    PEER_EVT_ID_ENV_RECOVERED = 6,
+    PEER_EVT_ID_RESTING = 7,
+    PEER_EVT_ID_SLEEP = 8,
+    PEER_EVT_ID_RESTING_BED = 9,
+    PEER_EVT_ID_SLEEP_IN_NIGHT_BED = 10,
+    PEER_EVT_ID_WAKE_UP_IN_NIGHT_BED = 11,
+    PEER_EVT_ID_EMPTY_BED = 12
 } peer_evt_id_t;
 
 typedef struct {
