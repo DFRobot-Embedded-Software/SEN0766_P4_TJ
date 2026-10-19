@@ -167,6 +167,37 @@ static bool engine_ready(void)
     return true;
 }
 
+static const char *const k_class_name[6] = {
+    "resting", "sleep", "resting_bed", "sleep_in_night_bed", "wake_up_in_night_bed", "empty_bed"
+};
+
+/** 这一拍 6 个类的概率。类名没变、未入队时也打，避免只看见上报的那一条。 */
+static void log_model_output(int32_t zone_id, const float prob[6], int top, int queued)
+{
+    ESP_LOGI(TAG, "model out zone_id=%ld top=%s queued=%d", (long)zone_id, k_class_name[top], queued);
+    ESP_LOGI(TAG, "  %s=%.3f %s=%.3f %s=%.3f", k_class_name[0], prob[0], k_class_name[1], prob[1],
+             k_class_name[2], prob[2]);
+    ESP_LOGI(TAG, "  %s=%.3f %s=%.3f %s=%.3f", k_class_name[3], prob[3], k_class_name[4], prob[4],
+             k_class_name[5], prob[5]);
+}
+
+/** 这一拍送给融合模型的传感器表。每区 10 行，旧秒在前。 */
+static void log_model_input(const peer_model_zone_in_t *z)
+{
+    char purpose[PEER_STR16 + 1];
+    memcpy(purpose, z->purpose, PEER_STR16);
+    purpose[PEER_STR16] = '\0';
+    ESP_LOGI(TAG, "model in zone_id=%ld purpose=\"%s\" model_zone=%d room=%d epoch=%.0f",
+             (long)z->zone_id, purpose, z->model_zone, z->room, z->epoch_sec);
+    for (int t = 0; t < 10; t++) {
+        const float *radar = z->radar + t * 5;
+        const float *env = z->env + t * 5;
+        ESP_LOGI(TAG,
+                 "  t=%d radar still=%.0f micro=%.0f slow=%.0f fast=%.0f event=%.0f | env temp=%.1f rh=%.1f co2=%.0f lux=%.0f db=%.1f",
+                 t, radar[0], radar[1], radar[2], radar[3], radar[4], env[0], env[1], env[2], env[3], env[4]);
+    }
+}
+
 /**
  * 这一拍先取走满窗的区，再拷声音。
  * 声环不满 10 秒、前端失败或编码器失败：不调用 event，上一拍类别不变。
@@ -191,7 +222,10 @@ static void run_beat(void)
         ESP_LOGE(TAG, "声音编码器失败，这一拍跳过");
         return;
     }
+    ESP_LOGI(TAG, "audio in samples=%d rate=16000 mels=%d first4=%.3f %.3f %.3f %.3f", AUDIO_SAMPLES, HAMIC_FEATURES,
+             s_in->data.f[0], s_in->data.f[1], s_in->data.f[2], s_in->data.f[3]);
     for (int i = 0; i < n; i++) {
+        log_model_input(&zones[i]);
         FusionSensorInput in{};
         memcpy(in.radar, zones[i].radar, sizeof(in.radar));
         memcpy(in.env, zones[i].env, sizeof(in.env));
@@ -202,6 +236,7 @@ static void run_beat(void)
         float logits[6];
         float prob[6];
         if (!fusion_sensor_encode(&in, sensor, s_sensor_ws)) {
+            ESP_LOGI(TAG, "model out zone_id=%ld encode rejected", (long)zones[i].zone_id);
             continue;
         }
         fusion_classify(s_out->data.f, sensor, logits);
@@ -213,17 +248,21 @@ static void run_beat(void)
             }
         }
         if (!finite) {
+            ESP_LOGI(TAG, "model out zone_id=%ld nonfinite", (long)zones[i].zone_id);
             continue;
         }
         int top = peer_model_top_class(prob);
+        int queued = 0;
         peer_event_t ev;
-        if (!peer_model_window_event(zones[i].zone_id, top, &ev)) {
-            continue;
+        /* 第一名不超过 0.6 不入队，上一拍类别保持不变。 */
+        if (peer_model_report_ok(prob, top) && peer_model_window_event(zones[i].zone_id, top, &ev)) {
+            /* 入队失败不记上一拍，下一拍第一名还是这个类会再试。 */
+            if (peer_judge_push(&ev)) {
+                peer_model_window_event_sent(zones[i].zone_id, top);
+                queued = 1;
+            }
         }
-        /* 入队失败不记上一拍，下一拍第一名还是这个类会再试。 */
-        if (peer_judge_push(&ev)) {
-            peer_model_window_event_sent(zones[i].zone_id, top);
-        }
+        log_model_output(zones[i].zone_id, prob, top, queued);
     }
 }
 

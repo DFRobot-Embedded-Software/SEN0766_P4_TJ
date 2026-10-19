@@ -51,6 +51,12 @@ int main(void)
 {
     float tie[6] = {0.1f, 0.4f, 0.4f, 0, 0, 0};
     expect(peer_model_top_class(tie) == 1, "tie keeps earlier class");
+    float low[6] = {0.6f, 0.1f, 0.1f, 0.1f, 0.05f, 0.05f};
+    float high[6] = {0.61f, 0.1f, 0.1f, 0.1f, 0.05f, 0.04f};
+    expect(!peer_model_report_ok(low, 0), "weight 0.6 does not report");
+    expect(peer_model_report_ok(high, 0), "weight above 0.6 reports");
+    expect(!peer_model_report_ok(high, 6), "class out of range");
+    expect(!peer_model_report_ok(NULL, 0), "null prob");
 
     peer_model_window_reset();
     peer_snapshot_t a = snap_at(100);

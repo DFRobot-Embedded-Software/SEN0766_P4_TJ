@@ -37,6 +37,9 @@ typedef struct {
 /** 6 类概率里最高的下标。相同则保留更前面的类，避免来回跳。 */
 int peer_model_top_class(const float prob[6]);
 
+/** 该类概率大于 0.6 才允许上报。等于 0.6、下标越界或 prob 为空返回 false。 */
+bool peer_model_report_ok(const float prob[6], int class_index);
+
 /** 上电状态：槽位释放，环境有效值也清掉。测试在两组场景之间调用。 */
 void peer_model_window_reset(void);
 

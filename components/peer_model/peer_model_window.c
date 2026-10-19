@@ -2,11 +2,13 @@
 
 #include "peer_event_map.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #if defined(ESP_PLATFORM)
 #include "esp_heap_caps.h"
+#include "esp_log.h"
 #endif
 
 #define ZONE_MAX 16
@@ -148,6 +150,27 @@ static zone_t *find_zone(int32_t zone_id)
     }
     return NULL;
 }
+
+#if defined(ESP_PLATFORM)
+/** 只在某个 zone_id 第一次建槽时打。用来看主机有没有在未配置时仍下发非 0 区号。 */
+static void log_zone_create(const peer_snapshot_t *snap, int index)
+{
+    const peer_target_t *t = &snap->targets[index];
+    char purpose[PEER_STR16 + 1];
+    char special[PEER_STR16 + 1];
+    char purpose_hex[PEER_STR16 * 2 + 1];
+    field_str(purpose, t->purpose);
+    field_str(special, t->special);
+    for (int i = 0; i < PEER_STR16; i++) {
+        sprintf(purpose_hex + i * 2, "%02x", (unsigned char)t->purpose[i]);
+    }
+    purpose_hex[PEER_STR16 * 2] = '\0';
+    ESP_LOGI("peer_model",
+             "new zone utc=%lu target_n=%u idx=%d zone_id=%ld track=%u kinesia=%u purpose=\"%s\" special=\"%s\" purpose_hex=%s",
+             (unsigned long)snap->utc_unix_s, snap->target_n, index, (long)t->zone_id, t->track_id,
+             t->kinesia, purpose, special, purpose_hex);
+}
+#endif
 
 /** 申请失败的区记下来，后面的快照不再试。表满了也直接忽略。 */
 static zone_t *ensure_zone(int32_t zone_id)
@@ -330,6 +353,11 @@ static void open_zones(const peer_snapshot_t *snap)
     for (uint8_t i = 0; i < lim; i++) {
         int32_t id = snap->targets[i].zone_id;
         if (id != 0) {
+#if defined(ESP_PLATFORM)
+            if (find_zone(id) == NULL && !failed_id(id)) {
+                log_zone_create(snap, i);
+            }
+#endif
             ensure_zone(id);
         }
     }
@@ -428,6 +456,14 @@ int peer_model_top_class(const float prob[6])
         }
     }
     return best;
+}
+
+bool peer_model_report_ok(const float prob[6], int class_index)
+{
+    if (prob == NULL || class_index < 0 || class_index > 5) {
+        return false;
+    }
+    return prob[class_index] > 0.6f;
 }
 
 void peer_model_window_reset(void)
