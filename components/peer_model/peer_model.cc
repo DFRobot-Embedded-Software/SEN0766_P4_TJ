@@ -3,7 +3,7 @@
 #include "peer_model_window.h"
 #include "peer_judge.h"
 
-#include "es7210_mic.h"
+#include "es7243e_mic.h"
 #include "esp_dsp_fft.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -23,6 +23,13 @@
 #include "tensorflow/lite/schema/schema_generated.h"
 
 static const char *TAG = "peer_model";
+
+/** 数值参考：mel + 96 维声音 + 32 维传感器 + 6 logit + 6 概率。随应用固件烧进 Flash。 */
+#define FIXTURE_FLOATS (HAMIC_FEATURES + 96 + 32 + 6 + 6)
+extern "C" {
+extern const unsigned char fixtures_start[] asm("_binary_fixtures_bin_start");
+extern const unsigned char fixtures_end[] asm("_binary_fixtures_bin_end");
+}
 
 /** 模型任务忙大约 1 秒时，50 ms 一帧的快照还能堆在这里。 */
 #define SNAP_Q         48
@@ -50,7 +57,7 @@ static tflite::MicroInterpreter *s_interpreter;
 static TfLiteTensor *s_in;
 static TfLiteTensor *s_out;
 
-/** 从环里拷最近 10 秒左声道。锁只包住拷贝，推理在锁外。不满 10 秒返回 false。 */
+/** 从环里拷最近 10 秒单声道 PCM。锁只包住拷贝，推理在锁外。不满 10 秒返回 false。 */
 static bool copy_latest_audio(int16_t *dst)
 {
     xSemaphoreTake(s_ring_mu, portMAX_DELAY);
@@ -69,12 +76,12 @@ static bool copy_latest_audio(int16_t *dst)
     return ok;
 }
 
-/** 交错立体声只留 MIC1。一次写入大约 256 点，持锁时间很短。 */
-static void push_left(const int16_t *stereo, int frames)
+/** 单声道 PCM16 写入环形缓冲。一次大约 256 点，持锁时间很短。 */
+static void push_pcm(const int16_t *pcm, int frames)
 {
     xSemaphoreTake(s_ring_mu, portMAX_DELAY);
     for (int i = 0; i < frames; i++) {
-        s_ring[s_wr] = stereo[i * 2];
+        s_ring[s_wr] = pcm[i];
         s_wr++;
         if (s_wr >= RING_SAMPLES) {
             s_wr = 0;
@@ -110,6 +117,13 @@ static bool engine_ready(void)
     if (s_interpreter != NULL) {
         return true;
     }
+    /* 引用起止符号，链接器才会把 fixtures.bin 留在应用固件里。 */
+    const size_t fixture_bytes = static_cast<size_t>(fixtures_end - fixtures_start);
+    if (fixture_bytes != FIXTURE_FLOATS * sizeof(float)) {
+        ESP_LOGE(TAG, "fixtures.bin 长度 %u，期望 %u", (unsigned)fixture_bytes,
+                 (unsigned)(FIXTURE_FLOATS * sizeof(float)));
+        return false;
+    }
     s_arena = static_cast<uint8_t *>(heap_caps_aligned_alloc(16, ARENA_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     s_audio = static_cast<float *>(heap_caps_aligned_alloc(16, HAMIC_SAMPLES * sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     s_pcm = static_cast<int16_t *>(heap_caps_aligned_alloc(16, AUDIO_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -130,6 +144,9 @@ static bool engine_ready(void)
         ESP_LOGE(TAG, "算子注册失败");
         return false;
     }
+    /* 编码器在 vendor/fusion_model.h 的 audio_encoder_tflite[]，113424 字节，
+     * 与 vendor/audio_encoder.tflite 同一份。传感器权重也在这个头里；
+     * vendor/fusion_weights.h 是同一组参数的单独导出，不要再包含一次。 */
     const tflite::Model *model = tflite::GetModel(fusion_model::audio_encoder_tflite);
     if (model->version() != TFLITE_SCHEMA_VERSION) {
         ESP_LOGE(TAG, "模型版本不匹配");
@@ -252,7 +269,7 @@ static void model_task(void *arg)
 static void mic_task(void *arg)
 {
     (void)arg;
-    const es7210_mic_pins_t pins = {
+    const es7243e_mic_pins_t pins = {
         .sda = GPIO_NUM_1,
         .scl = GPIO_NUM_2,
         .mclk = GPIO_NUM_6,
@@ -260,16 +277,16 @@ static void mic_task(void *arg)
         .lrck = GPIO_NUM_5,
         .sdo = GPIO_NUM_3,
     };
-    while (es7210_mic_init(&pins) != ESP_OK) {
-        ESP_LOGW(TAG, "未找到 ES7210，2 秒后重试");
+    while (es7243e_mic_init(&pins) != ESP_OK) {
+        ESP_LOGW(TAG, "未找到 ES7243E，2 秒后重试");
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
-    int16_t buf[MIC_FRAMES * 2];
+    int16_t buf[MIC_FRAMES];
     for (;;) {
-        if (es7210_mic_read(buf, sizeof(buf)) != ESP_OK) {
+        if (es7243e_mic_read(buf, sizeof(buf)) != ESP_OK) {
             continue;
         }
-        push_left(buf, MIC_FRAMES);
+        push_pcm(buf, MIC_FRAMES);
     }
 }
 

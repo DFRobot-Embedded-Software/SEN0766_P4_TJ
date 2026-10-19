@@ -60,7 +60,7 @@ void peer_event_reply_done(void *user)
     (void)user;
     peer_event_t ev;
     if (peer_judge_pop(&ev)) {
-        ESP_LOGI(TAG, "事件 %s ch=%s zone=%ld people=%u q=%d", ev.event_type,
+        ESP_LOGI(TAG, "peer_event %s ch=%s zone=%ld people=%u q=%d", ev.event_type,
                  ev.env_ch[0] ? ev.env_ch : "-", (long)ev.zone_id, ev.people_room,
                  peer_judge_queue_len());
     }

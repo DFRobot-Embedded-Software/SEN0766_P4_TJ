@@ -53,6 +53,6 @@ direct_dependencies:
 - espressif/esp-tflite-micro
 - espressif/esp_codec_dev
 - idf
-manifest_hash: 51e8a2e91b677eeb5cd52495da847827bd649b1a41a82462a6a627b0f3ac5236
+manifest_hash: f565f0986cf5099457aa7a1b4251c939b32728e10c907a545098bb5f09a0bb00
 target: esp32p4
 version: 2.0.0
