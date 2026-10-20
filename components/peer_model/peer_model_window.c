@@ -444,13 +444,13 @@ static bool commit_open(void)
     return true;
 }
 
-int peer_model_top_class(const float prob[6])
+int peer_model_top_class(const float prob[3])
 {
     int best = 0;
     if (prob == NULL) {
         return 0;
     }
-    for (int i = 1; i < 6; i++) {
+    for (int i = 1; i < 3; i++) {
         if (prob[i] > prob[best]) {
             best = i;
         }
@@ -458,9 +458,9 @@ int peer_model_top_class(const float prob[6])
     return best;
 }
 
-bool peer_model_report_ok(const float prob[6], int class_index)
+bool peer_model_report_ok(const float prob[3], int class_index)
 {
-    if (prob == NULL || class_index < 0 || class_index > 5) {
+    if (prob == NULL || class_index < 0 || class_index > 2) {
         return false;
     }
     return prob[class_index] > 0.6f;
@@ -570,15 +570,20 @@ bool peer_model_window_info(int32_t zone_id, peer_model_zone_info_t *out)
 
 bool peer_model_window_event(int32_t zone_id, int class_index, peer_event_t *ev)
 {
+    static const peer_evt_id_t k_class_evt[3] = {
+        PEER_EVT_ID_RESTING_BED,
+        PEER_EVT_ID_SLEEP_IN_NIGHT_BED,
+        PEER_EVT_ID_WORK_OFFICE,
+    };
     zone_t *z = find_zone(zone_id);
-    if (z == NULL || ev == NULL || class_index < 0 || class_index > 5) {
+    if (z == NULL || ev == NULL || class_index < 0 || class_index > 2) {
         return false;
     }
     /* 类名没变就不填事件，调用方也不该入队。 */
     if (z->last_class == class_index) {
         return false;
     }
-    const char *name = peer_evt_wire_name((peer_evt_id_t)(PEER_EVT_ID_RESTING + class_index));
+    const char *name = peer_evt_wire_name(k_class_evt[class_index]);
     if (name == NULL) {
         return false;
     }
