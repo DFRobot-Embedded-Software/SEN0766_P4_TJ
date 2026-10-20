@@ -4,7 +4,6 @@
 #include "peer_judge.h"
 
 #include "es7243e_mic.h"
-#include "esp_dsp_fft.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -12,31 +11,17 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "fusion_model.h"
-#include "fusion_native.h"
 #include "hamic_frontend.h"
 
-#include <cmath>
 #include <cstring>
 
-#include "tensorflow/lite/micro/micro_interpreter.h"
-#include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
-#include "tensorflow/lite/schema/schema_generated.h"
-
 static const char *TAG = "peer_model";
-
-/** 数值参考：mel + 96 维声音 + 32 维传感器 + 6 logit + 6 概率。随应用固件烧进 Flash。 */
-#define FIXTURE_FLOATS (HAMIC_FEATURES + 96 + 32 + 6 + 6)
-extern "C" {
-extern const unsigned char fixtures_start[] asm("_binary_fixtures_bin_start");
-extern const unsigned char fixtures_end[] asm("_binary_fixtures_bin_end");
-}
 
 /** 模型任务忙大约 1 秒时，50 ms 一帧的快照还能堆在这里。 */
 #define SNAP_Q         48
 #define RING_SAMPLES   (16 * 16000)
 #define AUDIO_SAMPLES  160000
 #define MIC_FRAMES     256
-#define ARENA_BYTES    (4 * 1024 * 1024)
 
 static QueueHandle_t s_snap_q;
 static TaskHandle_t s_model_task;
@@ -49,13 +34,10 @@ static SemaphoreHandle_t s_ring_mu;
 
 static int16_t *s_pcm;
 static float *s_audio;
-static HamicWorkspace *s_front;
-static FusionSensorWorkspace *s_sensor_ws;
-static uint8_t *s_arena;
-static tflite::MicroMutableOpResolver<6> s_resolver;
-static tflite::MicroInterpreter *s_interpreter;
-static TfLiteTensor *s_in;
-static TfLiteTensor *s_out;
+static float *s_mel;
+static HamicFrontendWorkspace *s_front;
+static uint8_t *s_workspace;
+static size_t s_workspace_bytes;
 
 /** 从环里拷最近 10 秒单声道 PCM。锁只包住拷贝，推理在锁外。不满 10 秒返回 false。 */
 static bool copy_latest_audio(int16_t *dst)
@@ -93,92 +75,36 @@ static void push_pcm(const int16_t *pcm, int frames)
     xSemaphoreGive(s_ring_mu);
 }
 
-static void softmax6(const float *logits, float *prob)
-{
-    float max = logits[0];
-    for (int i = 1; i < 6; i++) {
-        if (logits[i] > max) {
-            max = logits[i];
-        }
-    }
-    float sum = 0.0f;
-    for (int i = 0; i < 6; i++) {
-        prob[i] = std::exp(logits[i] - max);
-        sum += prob[i];
-    }
-    for (int i = 0; i < 6; i++) {
-        prob[i] /= sum;
-    }
-}
-
-/** 声音编码失败或张量对不上时，这一拍不出结果。上一拍类别留给窗口自己保留。 */
+/** 声音编码失败时，这一拍不出结果。上一拍类别留给窗口自己保留。 */
 static bool engine_ready(void)
 {
-    if (s_interpreter != NULL) {
+    if (s_workspace != NULL) {
         return true;
     }
-    /* 引用起止符号，链接器才会把 fixtures.bin 留在应用固件里。 */
-    const size_t fixture_bytes = static_cast<size_t>(fixtures_end - fixtures_start);
-    if (fixture_bytes != FIXTURE_FLOATS * sizeof(float)) {
-        ESP_LOGE(TAG, "fixtures.bin 长度 %u，期望 %u", (unsigned)fixture_bytes,
-                 (unsigned)(FIXTURE_FLOATS * sizeof(float)));
-        return false;
-    }
-    s_arena = static_cast<uint8_t *>(heap_caps_aligned_alloc(16, ARENA_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    s_audio = static_cast<float *>(heap_caps_aligned_alloc(16, HAMIC_SAMPLES * sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    s_pcm = static_cast<int16_t *>(heap_caps_aligned_alloc(16, AUDIO_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    s_front = static_cast<HamicWorkspace *>(heap_caps_aligned_alloc(16, sizeof(HamicWorkspace), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-    s_sensor_ws = static_cast<FusionSensorWorkspace *>(
-        heap_caps_calloc(1, sizeof(FusionSensorWorkspace), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (s_arena == NULL || s_audio == NULL || s_pcm == NULL || s_front == NULL || s_sensor_ws == NULL) {
+    s_workspace_bytes = hamic_workspace_bytes();
+    s_workspace = static_cast<uint8_t *>(
+        heap_caps_aligned_alloc(16, s_workspace_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    s_audio = static_cast<float *>(
+        heap_caps_aligned_alloc(16, HAMIC_SAMPLES * sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    s_mel = static_cast<float *>(
+        heap_caps_aligned_alloc(16, HAMIC_FEATURES * sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    s_pcm = static_cast<int16_t *>(
+        heap_caps_aligned_alloc(16, AUDIO_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    s_front = static_cast<HamicFrontendWorkspace *>(
+        heap_caps_aligned_alloc(16, sizeof(HamicFrontendWorkspace), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    if (s_workspace == NULL || s_audio == NULL || s_mel == NULL || s_pcm == NULL || s_front == NULL) {
         ESP_LOGE(TAG, "推理缓冲申请失败");
-        return false;
-    }
-    if (hamic_esp_dsp_fft_init() != 0) {
-        ESP_LOGE(TAG, "FFT 初始化失败");
-        return false;
-    }
-    if (s_resolver.AddPad() != kTfLiteOk || s_resolver.AddConv2D() != kTfLiteOk ||
-        s_resolver.AddDepthwiseConv2D() != kTfLiteOk || s_resolver.AddConcatenation() != kTfLiteOk ||
-        s_resolver.AddAveragePool2D() != kTfLiteOk || s_resolver.AddReshape() != kTfLiteOk) {
-        ESP_LOGE(TAG, "算子注册失败");
-        return false;
-    }
-    /* 编码器在 vendor/fusion_model.h 的 audio_encoder_tflite[]，113424 字节，
-     * 与 vendor/audio_encoder.tflite 同一份。传感器权重也在这个头里；
-     * vendor/fusion_weights.h 是同一组参数的单独导出，不要再包含一次。 */
-    const tflite::Model *model = tflite::GetModel(fusion_model::audio_encoder_tflite);
-    if (model->version() != TFLITE_SCHEMA_VERSION) {
-        ESP_LOGE(TAG, "模型版本不匹配");
-        return false;
-    }
-    s_interpreter = new tflite::MicroInterpreter(model, s_resolver, s_arena, ARENA_BYTES);
-    if (s_interpreter == NULL || s_interpreter->AllocateTensors() != kTfLiteOk) {
-        ESP_LOGE(TAG, "AllocateTensors 失败");
-        return false;
-    }
-    s_in = s_interpreter->input(0);
-    s_out = s_interpreter->output(0);
-    if (s_in->type != kTfLiteFloat32 || s_out->type != kTfLiteFloat32 ||
-        s_in->bytes != HAMIC_FEATURES * sizeof(float) || s_out->bytes != 96 * sizeof(float)) {
-        ESP_LOGE(TAG, "输入输出张量不符合 10 秒编码器");
         return false;
     }
     return true;
 }
 
-static const char *const k_class_name[6] = {
-    "resting", "sleep", "resting_bed", "sleep_in_night_bed", "wake_up_in_night_bed", "empty_bed"
-};
-
-/** 这一拍 6 个类的概率。类名没变、未入队时也打，避免只看见上报的那一条。 */
-static void log_model_output(int32_t zone_id, const float prob[6], int top, int queued)
+/** 这一拍 3 个类的概率。概率已是 softmax。类名没变、未入队时也打。 */
+static void log_model_output(int32_t zone_id, const float prob[HAMIC_CLASS_COUNT], int top, int queued)
 {
-    ESP_LOGI(TAG, "model out zone_id=%ld top=%s queued=%d", (long)zone_id, k_class_name[top], queued);
-    ESP_LOGI(TAG, "  %s=%.3f %s=%.3f %s=%.3f", k_class_name[0], prob[0], k_class_name[1], prob[1],
-             k_class_name[2], prob[2]);
-    ESP_LOGI(TAG, "  %s=%.3f %s=%.3f %s=%.3f", k_class_name[3], prob[3], k_class_name[4], prob[4],
-             k_class_name[5], prob[5]);
+    ESP_LOGI(TAG, "model out zone_id=%ld top=%s queued=%d", (long)zone_id, hamic_class_names[top], queued);
+    ESP_LOGI(TAG, "  %s=%.3f %s=%.3f %s=%.3f", hamic_class_names[0], prob[0], hamic_class_names[1], prob[1],
+             hamic_class_names[2], prob[2]);
 }
 
 /** 这一拍送给融合模型的传感器表。每区 10 行，旧秒在前。 */
@@ -198,6 +124,20 @@ static void log_model_input(const peer_model_zone_in_t *z)
     }
 }
 
+static void fill_sensor(const peer_model_zone_in_t *z, HamicSensorInput *in)
+{
+    memset(in, 0, sizeof(*in));
+    for (int t = 0; t < 10; t++) {
+        for (int c = 0; c < 5; c++) {
+            in->radar[t][c] = z->radar[t * 5 + c];
+            in->env[t][c] = z->env[t * 5 + c];
+        }
+    }
+    in->epoch_seconds = z->epoch_sec;
+    in->zone = z->model_zone;
+    in->room = z->room;
+}
+
 /**
  * 这一拍先取走满窗的区，再拷声音。
  * 声环不满 10 秒、前端失败或编码器失败：不调用 event，上一拍类别不变。
@@ -214,55 +154,44 @@ static void run_beat(void)
         return;
     }
     hamic_pcm16_to_float(s_pcm, s_audio, AUDIO_SAMPLES);
-    if (hamic_frontend_16k(s_audio, AUDIO_SAMPLES, s_in->data.f, s_front, hamic_esp_dsp_fft512) != HAMIC_OK) {
+    if (hamic_frontend_16k(s_audio, AUDIO_SAMPLES, s_mel, s_front, hamic_fft512_portable) != HAMIC_OK) {
         ESP_LOGE(TAG, "声音前端失败，这一拍跳过");
         return;
     }
-    if (s_interpreter->Invoke() != kTfLiteOk) {
+    float audio96[96];
+    if (hamic_encode_audio(s_mel, s_workspace, s_workspace_bytes, audio96) != HAMIC_OK) {
         ESP_LOGE(TAG, "声音编码器失败，这一拍跳过");
         return;
     }
     ESP_LOGI(TAG, "audio in samples=%d rate=16000 mels=%d first4=%.3f %.3f %.3f %.3f", AUDIO_SAMPLES, HAMIC_FEATURES,
-             s_in->data.f[0], s_in->data.f[1], s_in->data.f[2], s_in->data.f[3]);
+             s_mel[0], s_mel[1], s_mel[2], s_mel[3]);
     for (int i = 0; i < n; i++) {
         log_model_input(&zones[i]);
-        FusionSensorInput in{};
-        memcpy(in.radar, zones[i].radar, sizeof(in.radar));
-        memcpy(in.env, zones[i].env, sizeof(in.env));
-        in.epoch_sec = zones[i].epoch_sec;
-        in.zone = zones[i].model_zone;
-        in.room = zones[i].room;
-        float sensor[32];
-        float logits[6];
-        float prob[6];
-        if (!fusion_sensor_encode(&in, sensor, s_sensor_ws)) {
+        HamicSensorInput in;
+        fill_sensor(&zones[i], &in);
+        float sensor32[32];
+        HamicOutput output;
+        if (hamic_encode_sensor(&in, s_workspace, s_workspace_bytes, sensor32) != HAMIC_OK) {
             ESP_LOGI(TAG, "model out zone_id=%ld encode rejected", (long)zones[i].zone_id);
             continue;
         }
-        fusion_classify(s_out->data.f, sensor, logits);
-        softmax6(logits, prob);
-        bool finite = true;
-        for (int c = 0; c < 6; c++) {
-            if (!std::isfinite(prob[c])) {
-                finite = false;
-            }
-        }
-        if (!finite) {
-            ESP_LOGI(TAG, "model out zone_id=%ld nonfinite", (long)zones[i].zone_id);
+        if (hamic_fuse_features(audio96, sensor32, &output) != HAMIC_OK) {
+            ESP_LOGI(TAG, "model out zone_id=%ld fusion rejected", (long)zones[i].zone_id);
             continue;
         }
-        int top = peer_model_top_class(prob);
+        int top = peer_model_top_class(output.probabilities);
         int queued = 0;
         peer_event_t ev;
         /* 第一名不超过 0.6 不入队，上一拍类别保持不变。 */
-        if (peer_model_report_ok(prob, top) && peer_model_window_event(zones[i].zone_id, top, &ev)) {
+        if (peer_model_report_ok(output.probabilities, top) &&
+            peer_model_window_event(zones[i].zone_id, top, &ev)) {
             /* 入队失败不记上一拍，下一拍第一名还是这个类会再试。 */
             if (peer_judge_push(&ev)) {
                 peer_model_window_event_sent(zones[i].zone_id, top);
                 queued = 1;
             }
         }
-        log_model_output(zones[i].zone_id, prob, top, queued);
+        log_model_output(zones[i].zone_id, output.probabilities, top, queued);
     }
 }
 

@@ -49,13 +49,13 @@ static bool feed(uint32_t sec, int32_t zone, const char *purpose)
 
 int main(void)
 {
-    float tie[6] = {0.1f, 0.4f, 0.4f, 0, 0, 0};
+    float tie[3] = {0.1f, 0.4f, 0.4f};
     expect(peer_model_top_class(tie) == 1, "tie keeps earlier class");
-    float low[6] = {0.6f, 0.1f, 0.1f, 0.1f, 0.05f, 0.05f};
-    float high[6] = {0.61f, 0.1f, 0.1f, 0.1f, 0.05f, 0.04f};
+    float low[3] = {0.6f, 0.2f, 0.2f};
+    float high[3] = {0.61f, 0.2f, 0.19f};
     expect(!peer_model_report_ok(low, 0), "weight 0.6 does not report");
     expect(peer_model_report_ok(high, 0), "weight above 0.6 reports");
-    expect(!peer_model_report_ok(high, 6), "class out of range");
+    expect(!peer_model_report_ok(high, 3), "class out of range");
     expect(!peer_model_report_ok(NULL, 0), "null prob");
 
     peer_model_window_reset();
@@ -194,12 +194,15 @@ int main(void)
     peer_model_window_zones(zones, 4);
     peer_event_t ev;
     expect(peer_model_window_event(3, 0, &ev), "first class reports");
-    expect(strcmp(ev.event_type, "resting") == 0 && ev.env_ch[0] == '\0' && ev.zone_id == 3, "event fields");
+    expect(strcmp(ev.event_type, "resting_bed") == 0 && ev.env_ch[0] == '\0' && ev.zone_id == 3, "event fields");
     peer_model_window_event_sent(3, 0);
     expect(!peer_model_window_event(3, 0, &ev), "same class stays quiet");
-    expect(peer_model_window_event(3, 3, &ev), "new class reports");
-    expect(strcmp(ev.event_type, "sleep_in_night_bed") == 0, "class 3 name");
-    expect(peer_model_window_event(3, 3, &ev), "unsent class reports again");
+    expect(!peer_model_window_event(3, 3, &ev), "old 6-class index rejected");
+    expect(peer_model_window_event(3, 1, &ev), "new class reports");
+    expect(strcmp(ev.event_type, "sleep_in_night_bed") == 0, "class 1 name");
+    expect(peer_model_window_event(3, 2, &ev), "work class reports");
+    expect(strcmp(ev.event_type, "work_office") == 0, "class 2 name");
+    expect(peer_model_window_event(3, 1, &ev), "unsent class reports again");
 
     if (g_fail) {
         return 1;

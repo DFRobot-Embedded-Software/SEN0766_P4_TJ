@@ -14,8 +14,10 @@
  *   10 sleep_in_night_bed
  *   11 wake_up_in_night_bed
  *   12 empty_bed
+ *   13 work_office
  *
- * 7–12 是融合模型的第一名类名。只在该类相对该区上一拍变化时入队，编号不要复用。
+ * 当前模型只上报 9、10、13。7、8、11、12 仍留在表里，编号不要复用。
+ * 只在该类相对该区上一拍变化时入队。
  *
  * 判定代码只引用编号。回包 ASCII 从本表查出。新增事件：加枚举、加一行表、再写判定分支。
  */
@@ -35,7 +37,8 @@ typedef enum {
     PEER_EVT_ID_RESTING_BED = 9,
     PEER_EVT_ID_SLEEP_IN_NIGHT_BED = 10,
     PEER_EVT_ID_WAKE_UP_IN_NIGHT_BED = 11,
-    PEER_EVT_ID_EMPTY_BED = 12
+    PEER_EVT_ID_EMPTY_BED = 12,
+    PEER_EVT_ID_WORK_OFFICE = 13
 } peer_evt_id_t;
 
 typedef struct {

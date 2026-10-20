@@ -139,8 +139,9 @@ UART 收发。扫到 `0x10` / `0x11` 后调用 `on_rx`。`0x10` 处理完立刻�
 | 10 | `sleep_in_night_bed` |
 | 11 | `wake_up_in_night_bed` |
 | 12 | `empty_bed` |
+| 13 | `work_office` |
 
-7–12 是融合模型的第一名。只在该类相对该区上一拍变化时出现，帧长仍是 136。新增事件时在 `peer_event_map` 表尾加一行，编号不要复用。线上英文名只从这张表取。
+当前模型第一名只有 `resting_bed`、`sleep_in_night_bed`、`work_office`。只在该类相对该区上一拍变化时出现，帧长仍是 136。7、8、11、12 仍留在表里。新增事件时在 `peer_event_map` 表尾加一行，编号不要复用。线上英文名只从这张表取。
 
 队列最多 24 条。满了丢掉最新的一条。每条都是完整的 136 字节 `0x20`，一帧 `0x10` 里可以连续发出多条。
 
@@ -165,7 +166,7 @@ test_peer_model_window.exe
 
 ## 编译
 
-`es7243e_mic` 依赖 `espressif/esp_codec_dev`。`peer_model` 依赖 TFLite Micro 1.4.0、ESP-DSP 1.8.2、ESP-NN 1.3.2。`managed_components/` 和 `build/` 不入库，第一次编译会重新下载：
+`es7243e_mic` 依赖 `espressif/esp_codec_dev`。融合模型是三类原生 C，不再依赖 TFLite Micro、ESP-DSP、ESP-NN。`managed_components/` 和 `build/` 不入库，第一次编译会重新下载：
 
 ```text
 idf.py set-target esp32p4

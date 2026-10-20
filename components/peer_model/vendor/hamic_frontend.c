@@ -1,5 +1,5 @@
 #include "hamic_frontend.h"
-#include "hamic_tables.h"
+#include "hamic_model.h"
 
 #include <math.h>
 #include <string.h>
@@ -42,7 +42,7 @@ int hamic_fft512_portable(float *data)
 }
 
 int hamic_frontend_16k(const float *audio, size_t sample_count,
-                       float *output, HamicWorkspace *workspace, HamicFFT512 fft)
+                       float *output, HamicFrontendWorkspace *workspace, HamicFFT512 fft)
 {
     if (!audio || !output || !workspace || sample_count != HAMIC_SAMPLES)
         return HAMIC_INVALID_ARGUMENT;
@@ -73,35 +73,8 @@ int hamic_frontend_16k(const float *audio, size_t sample_count,
     return HAMIC_OK;
 }
 
-int hamic_resample_44100(const float *audio, size_t sample_count, float *output)
-{
-    if (!audio || !output || sample_count != HAMIC_SOURCE_SAMPLES)
-        return HAMIC_INVALID_ARGUMENT;
-    for (size_t n = 0; n < sample_count; ++n)
-        if (!isfinite(audio[n])) return HAMIC_NONFINITE;
-    /* U=160, D=441, half_len=4410. Delay-compensated convolution:
-     * y[k] = sum_n x[n] h[441*k + 4410 - 160*n].
-     * h includes the factor U, and out-of-window x is zero. */
-    for (int k = 0; k < HAMIC_SAMPLES; ++k) {
-        int center = 441 * k + 4410;
-        int first = center > 8820 ? (center - 8820 + 159) / 160 : 0;
-        int last = center / 160;
-        if (last >= HAMIC_SOURCE_SAMPLES) last = HAMIC_SOURCE_SAMPLES - 1;
-        float value = 0.0f;
-        for (int n = first, tap = center - 160 * first; n <= last; ++n, tap -= 160)
-            value += audio[n] * hamic_resample_fir[tap];
-        if (!isfinite(value)) return HAMIC_NONFINITE;
-        output[k] = value;
-    }
-    return HAMIC_OK;
-}
-
 void hamic_pcm16_to_float(const int16_t *pcm, float *output, size_t count)
 {
     for (size_t n = 0; n < count; ++n) output[n] = (float)pcm[n] * (1.0f / 32768.0f);
 }
 
-void hamic_pcm32_to_float(const int32_t *pcm, float *output, size_t count)
-{
-    for (size_t n = 0; n < count; ++n) output[n] = (float)pcm[n] * (1.0f / 2147483648.0f);
-}

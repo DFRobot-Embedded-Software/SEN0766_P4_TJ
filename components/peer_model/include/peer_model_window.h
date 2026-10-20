@@ -30,15 +30,15 @@ typedef struct {
 typedef struct {
     int filled;                     /**< 已收口秒数，0–10。 */
     int model_zone;
-    int last_class;                 /**< 已上报的类，0–5。还没报过为 -1。 */
+    int last_class;                 /**< 已上报的类，0–2。还没报过为 -1。 */
     float radar[50];
 } peer_model_zone_info_t;
 
-/** 6 类概率里最高的下标。相同则保留更前面的类，避免来回跳。 */
-int peer_model_top_class(const float prob[6]);
+/** 3 类概率里最高的下标。相同则保留更前面的类，避免来回跳。 */
+int peer_model_top_class(const float prob[3]);
 
 /** 该类概率大于 0.6 才允许上报。等于 0.6、下标越界或 prob 为空返回 false。 */
-bool peer_model_report_ok(const float prob[6], int class_index);
+bool peer_model_report_ok(const float prob[3], int class_index);
 
 /** 上电状态：槽位释放，环境有效值也清掉。测试在两组场景之间调用。 */
 void peer_model_window_reset(void);
@@ -66,7 +66,7 @@ bool peer_model_window_info(int32_t zone_id, peer_model_zone_info_t *out);
 
 /**
  * 第一名相对上一拍变了才填 ev 并返回 true。不修改上一拍类别。
- * class_index 为 0–5，对应映射表 7–12。
+ * class_index 为 0–2，对应 resting_bed、sleep_in_night_bed、work_office。
  */
 bool peer_model_window_event(int32_t zone_id, int class_index, peer_event_t *ev);
 
