@@ -12,6 +12,7 @@
 #if defined(ESP_PLATFORM)
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "esp_timer.h"
 #endif
 
 #define Q_MAX 24  /**< 边沿和模型事件共用。满了丢最新的，避免挤掉更早的进出房。 */
@@ -83,6 +84,118 @@ static bool s_frozen;
 static peer_event_t s_q[Q_MAX];
 static int s_q_n;
 
+#define COOL_MAX 32
+#define COOL_MS  30000
+
+typedef struct {
+    char event_type[PEER_EVENT_STR_MAX];
+    char env_ch[PEER_STR16];
+    int32_t zone_id;
+    int64_t last_ms;
+    bool used;
+} cool_t;
+
+static cool_t s_cool[COOL_MAX];
+static int64_t s_now_ms;
+static bool s_now_fixed;
+
+static int64_t now_ms(void)
+{
+    if (s_now_fixed) {
+        return s_now_ms;
+    }
+#if defined(ESP_PLATFORM)
+    return (int64_t)(esp_timer_get_time() / 1000);
+#else
+    /* ponytail: PC 没有 esp_timer。未覆盖时固定成开机已过 5 秒，避免自检把 0 当成真实时间。 */
+    return 5000;
+#endif
+}
+
+static void test_now(int64_t ms)
+{
+    s_now_ms = ms;
+    s_now_fixed = true;
+}
+
+static void test_now_off(void)
+{
+    s_now_fixed = false;
+}
+
+/** 比到结尾 0 或字段容量。容量内没有 0 则整段都要相等。 */
+static bool field_eq(const char *a, const char *b, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (a[i] != b[i]) {
+            return false;
+        }
+        if (a[i] == '\0') {
+            return true;
+        }
+    }
+    return true;
+}
+
+static bool cool_same(const cool_t *c, const peer_event_t *ev)
+{
+    return c->used && c->zone_id == ev->zone_id &&
+           field_eq(c->event_type, ev->event_type, sizeof(c->event_type)) &&
+           field_eq(c->env_ch, ev->env_ch, sizeof(c->env_ch));
+}
+
+static int cool_find(const peer_event_t *ev)
+{
+    for (int i = 0; i < COOL_MAX; i++) {
+        if (cool_same(&s_cool[i], ev)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static bool cool_blocked(const peer_event_t *ev)
+{
+    int i = cool_find(ev);
+    if (i < 0) {
+        return false;
+    }
+    return now_ms() - s_cool[i].last_ms < (int64_t)COOL_MS;
+}
+
+static void cool_write(int i, const peer_event_t *ev)
+{
+    cool_t *c = &s_cool[i];
+    memset(c, 0, sizeof(*c));
+    memcpy(c->event_type, ev->event_type, sizeof(c->event_type));
+    memcpy(c->env_ch, ev->env_ch, sizeof(c->env_ch));
+    c->zone_id = ev->zone_id;
+    c->last_ms = now_ms();
+    c->used = true;
+}
+
+static void cool_stamp(const peer_event_t *ev)
+{
+    int i = cool_find(ev);
+    if (i < 0) {
+        for (int k = 0; k < COOL_MAX; k++) {
+            if (!s_cool[k].used) {
+                i = k;
+                break;
+            }
+        }
+    }
+    if (i < 0) {
+        i = 0;
+        for (int k = 1; k < COOL_MAX; k++) {
+            if (s_cool[k].last_ms < s_cool[i].last_ms) {
+                i = k;
+            }
+        }
+    }
+    cool_write(i, ev);
+}
+
 #if defined(ESP_PLATFORM)
 static SemaphoreHandle_t s_q_mu;
 
@@ -104,20 +217,29 @@ static void q_lock(void) {}
 static void q_unlock(void) {}
 #endif
 
-/** 调用方已持有队列锁。满了直接返回。 */
-static void push_unlocked(const peer_event_t *ev)
+/**
+ * 调用方已持有队列锁。
+ * 冷却期内丢掉并返回 true。队列满返回 false，不记冷却。
+ * 成功写入后才盖时间戳。
+ */
+static bool enqueue_unlocked(const peer_event_t *ev)
 {
+    if (cool_blocked(ev)) {
+        return true;
+    }
     if (s_q_n >= Q_MAX) {
-        return; /* ponytail: 队列满则丢最新。模型一拍最多 16 条，24 仍可能被边沿挤满。 */
+        return false; /* ponytail: 队列满则丢最新。模型一拍最多 16 条，24 仍可能被边沿挤满。 */
     }
     s_q[s_q_n++] = *ev;
+    cool_stamp(ev);
+    return true;
 }
 
-/** 边沿判定内部入队。满了丢这一条。 */
+/** 边沿判定内部入队。冷却丢掉或队列满都不入队。 */
 static void push(const peer_event_t *ev)
 {
     q_lock();
-    push_unlocked(ev);
+    (void)enqueue_unlocked(ev);
     q_unlock();
 }
 
@@ -127,10 +249,7 @@ bool peer_judge_push(const peer_event_t *ev)
         return false;
     }
     q_lock();
-    bool ok = s_q_n < Q_MAX;
-    if (ok) {
-        push_unlocked(ev);
-    }
+    bool ok = enqueue_unlocked(ev);
     q_unlock();
     return ok;
 }
@@ -184,6 +303,7 @@ static void fill(peer_event_t *ev, peer_evt_id_t id, const char *env_ch, int32_t
             continue;
         }
         ev->targets[n].track_id = snap->targets[i].track_id;
+        peer_motion_name(snap->targets[i].kinesia, ev->targets[n].motion);
         ev->targets[n].x_cm = snap->targets[i].x_cm;
         ev->targets[n].y_cm = snap->targets[i].y_cm;
         n++;
@@ -483,6 +603,7 @@ void peer_judge_reset(void)
     memset(s_in_bad, 0, sizeof(s_in_bad));
     s_frozen = false;
     s_q_n = 0;
+    memset(s_cool, 0, sizeof(s_cool));
     q_unlock();
 }
 
@@ -580,14 +701,78 @@ static peer_snapshot_t blank(void)
     return s;
 }
 
+/** 冷却和「24 个不同区撑满队列」。失败时调用方负责关掉测试时钟。 */
+static bool cool_cases(void)
+{
+    peer_event_t ev;
+    peer_judge_reset();
+    test_now(0);
+    memset(&ev, 0, sizeof(ev));
+    memcpy(ev.event_type, "resting", 8);
+    ev.zone_id = 3;
+    if (!peer_judge_push(&ev) || peer_judge_queue_len() != 1) {
+        return false;
+    }
+    /* 中间这次被丢掉，也不能把 30 秒窗口从 0 ms 往后推。 */
+    test_now(10000);
+    if (!peer_judge_push(&ev) || peer_judge_queue_len() != 1) {
+        return false;
+    }
+    test_now(29999);
+    if (!peer_judge_push(&ev) || peer_judge_queue_len() != 1) {
+        return false;
+    }
+    test_now(30000);
+    if (!peer_judge_push(&ev) || peer_judge_queue_len() != 2) {
+        return false;
+    }
+    ev.zone_id = 4;
+    if (!peer_judge_push(&ev) || peer_judge_queue_len() != 3) {
+        return false;
+    }
+    ev.zone_id = 3;
+    memcpy(ev.env_ch, "co2", 4);
+    if (!peer_judge_push(&ev) || peer_judge_queue_len() != 4) {
+        return false;
+    }
+    peer_judge_reset();
+    test_now(30000);
+    memset(&ev, 0, sizeof(ev));
+    memcpy(ev.event_type, "resting", 8);
+    ev.zone_id = 3;
+    if (!peer_judge_push(&ev) || peer_judge_queue_len() != 1) {
+        return false;
+    }
+
+    peer_judge_reset();
+    for (int i = 0; i < 24; i++) {
+        memset(&ev, 0, sizeof(ev));
+        memcpy(ev.event_type, "resting", 8);
+        ev.zone_id = i;
+        if (!peer_judge_push(&ev)) {
+            return false;
+        }
+    }
+    memset(&ev, 0, sizeof(ev));
+    memcpy(ev.event_type, "resting", 8);
+    ev.zone_id = 24;
+    peer_event_t head;
+    if (peer_judge_push(&ev) || peer_judge_queue_len() != 24 || !peer_judge_peek(&head) ||
+        head.zone_id != 0 || strcmp(head.event_type, "resting") != 0) {
+        return false;
+    }
+    peer_judge_reset();
+    return true;
+}
+
 /**
  * 主机可跑的自检：结构体尺寸、事件名、Modbus CRC 向量、进出房/区、
  * CO₂ 与温度边沿、0x11 生效时机、空窗不报离房、流式拆帧。
  * 任何一步不对就返回 false。不依赖 ESP-IDF。
  */
-bool peer_judge_selfcheck(void)
+static bool selfcheck_body(void)
 {
-    if (sizeof(peer_snapshot_t) != 393 || sizeof(peer_event_t) != 136 ||
+    if (sizeof(peer_snapshot_t) != 393 || sizeof(peer_event_t) != 200 ||
         sizeof(peer_env_cfg_t) != 26) {
         return false;
     }
@@ -623,21 +808,24 @@ bool peer_judge_selfcheck(void)
     s.people_room = 1;
     s.target_n = 2;
     s.targets[0].track_id = 1;
+    s.targets[0].kinesia = 90;
     s.targets[0].x_cm = 120;
     s.targets[0].y_cm = 80;
     s.targets[0].zone_id = 3;
     memcpy(s.targets[0].purpose, "bed", 3);
     s.targets[1].track_id = 2;
+    s.targets[1].kinesia = 2;
     s.targets[1].zone_id = 0;
     s.targets[1].x_cm = 10;
     peer_judge_on_snapshot(&s);
     if (!peer_judge_pop(&ev) || strcmp(ev.event_type, peer_evt_wire_name(PEER_EVT_ID_ROOM_ENTRY)) != 0 ||
-        ev.zone_id != 0 || ev.env_ch[0] != '\0' || ev.people_room != 1 || ev.target_n != 2) {
+        ev.zone_id != 0 || ev.env_ch[0] != '\0' || ev.people_room != 1 || ev.target_n != 2 ||
+        strcmp(ev.targets[0].motion, "fast") != 0 || strcmp(ev.targets[1].motion, "micro") != 0) {
         return false;
     }
     if (!peer_judge_pop(&ev) || strcmp(ev.event_type, peer_evt_wire_name(PEER_EVT_ID_ZONE_RETURN)) != 0 ||
         ev.zone_id != 3 || strcmp(ev.purpose, "bed") != 0 || ev.target_n != 1 ||
-        ev.targets[0].track_id != 1) {
+        ev.targets[0].track_id != 1 || strcmp(ev.targets[0].motion, "fast") != 0) {
         return false;
     }
 
@@ -705,6 +893,8 @@ bool peer_judge_selfcheck(void)
     if (peer_judge_pop(&ev)) {
         return false;
     }
+    /* 上一轮 co2 越阈还在 30 秒内。拨过窗口，这条新边沿才应该入队。 */
+    test_now(30000);
     s.co2_ppm = 400;
     peer_judge_on_snapshot(&s);
     if (!peer_judge_pop(&ev) || strcmp(ev.env_ch, "co2") != 0 ||
@@ -831,23 +1021,18 @@ bool peer_judge_selfcheck(void)
         strcmp(peer_evt_wire_name(PEER_EVT_ID_WORK_OFFICE), "work_office") != 0) {
         return false;
     }
-    /* 模型任务和边沿共用 24 条队列。满了丢掉新的，队头还是第一条。 */
-    peer_judge_reset();
-    peer_event_t pushed;
-    memset(&pushed, 0, sizeof(pushed));
-    memcpy(pushed.event_type, "resting", 8);
-    for (int i = 0; i < 24; i++) {
-        if (!peer_judge_push(&pushed)) {
-            return false;
-        }
-    }
-    if (peer_judge_push(&pushed) || peer_judge_queue_len() != 24) {
+    if (!cool_cases()) {
         return false;
     }
-    peer_event_t head;
-    if (!peer_judge_peek(&head) || strcmp(head.event_type, "resting") != 0) {
-        return false;
-    }
-    peer_judge_reset();
     return true;
+}
+
+/** 自检全程用测试时钟。无论成败都关掉，并清掉自检留下的冷却记录。 */
+bool peer_judge_selfcheck(void)
+{
+    test_now(0);
+    bool ok = selfcheck_body();
+    test_now_off();
+    peer_judge_reset();
+    return ok;
 }

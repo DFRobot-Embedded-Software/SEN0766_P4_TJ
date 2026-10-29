@@ -299,6 +299,7 @@ static void frame_people(const peer_snapshot_t *snap, int32_t zone_id, uint8_t *
         }
         if (*tn < PEER_TARGET_MAX) {
             targets[*tn].track_id = t->track_id;
+            peer_motion_name(t->kinesia, targets[*tn].motion);
             targets[*tn].x_cm = t->x_cm;
             targets[*tn].y_cm = t->y_cm;
             (*tn)++;

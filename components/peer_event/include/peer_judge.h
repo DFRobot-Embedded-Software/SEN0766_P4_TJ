@@ -41,7 +41,9 @@ bool peer_judge_pop(peer_event_t *out);
 
 /**
  * 模型任务入队一条已经填好的事件。
- * 满了返回 false，队头保持不变。ev 只在本次调用内读取。
+ * 相同 event_type、zone_id、env_ch 距上次成功入队不满 30 秒：丢掉并返回 true。
+ * 队列已满返回 false，不记冷却时间，队头保持不变。ev 为空返回 false。
+ * ev 只在本次调用内读取。
  */
 bool peer_judge_push(const peer_event_t *ev);
 

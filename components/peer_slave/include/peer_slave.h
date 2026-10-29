@@ -5,7 +5,7 @@
  *
  * 只做收发，不算进出房、不解释环境阈值。线格式在 peer_frame，边沿在 peer_event。
  * S3 周期发 0x11（有则先发）和 0x10；P4 扫到完整帧后回调上层。
- * 队列里有事件才主动发 0x20，长度必须是 sizeof(peer_event_t)（136）。不再发 len=0 空帧，也没有 SPI 两拍读回。
+ * 队列里有事件才主动发 0x20，长度必须是 sizeof(peer_event_t)（200）。不再发 len=0 空帧，也没有 SPI 两拍读回。
  *
  * 麦占用 GPIO1–6，业务 UART 避开这两脚。TX/RX 与 S3 交叉：本板 TX 接对端 RX。
  * 默认 3 Mbps、8N1、无流控。CRC 频繁失败时可把 PEER_UART_BAUD 改成 921600，帧格式不变。
@@ -56,7 +56,7 @@ typedef struct {
     void (*on_idle)(void *user);
     /**
      * 取一条待发事件的 payload（peer_event_t）。
-     * 返回 136 表示有事件；返回 0 表示队列空。本函数不弹队列。
+     * 返回 200 表示有事件；返回 0 表示队列空。本函数不弹队列。
      */
     uint16_t (*reply_payload)(uint8_t seq, uint8_t *dst, uint16_t dst_max, void *user);
     /** 对应的 0x20 已经写入 UART 之后调用，上层此时才出队。 */

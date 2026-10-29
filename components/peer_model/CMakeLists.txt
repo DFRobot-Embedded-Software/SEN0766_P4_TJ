@@ -1,4 +1,4 @@
-idf_component_register(SRCS "peer_model_window.c"
+idf_component_register(SRCS "test_peer_model_window.c" "peer_model_window.c"
                          "peer_model.cc"
                          "vendor/hamic_model.c"
                          "vendor/hamic_inference.c"

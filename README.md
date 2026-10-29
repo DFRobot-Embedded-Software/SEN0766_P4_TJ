@@ -58,9 +58,9 @@ A5 5A | ver | msg_type | seq | len(u16 LE) | payload | crc16(LE)
 |----------|------|------|------|
 | `0x10` | S3 → P4 | `peer_snapshot_t` 瞬时雷达和环境 | 393 |
 | `0x11` | S3 → P4 | `peer_env_cfg_t` 全机一份阈值 | 26 |
-| `0x20` | P4 → S3 | `peer_event_t` 一条事件 | 136 |
+| `0x20` | P4 → S3 | `peer_event_t` 一条事件 | 200 |
 
-长度不对就丢，包括旧的 118 字节事件帧。没有空事件帧，没有 SPI 两拍，没有反向 OTA。
+长度不对就丢，包括旧的 118、136、144 字节事件帧。没有空事件帧，没有 SPI 两拍，没有反向 OTA。每条轨迹摘要是轨迹号、`motion`、横坐标、纵坐标。`motion` 由从机按 `0x10` 的 `kinesia` 写成 `still`、`micro`、`slow`、`fast`，分不出档则为空串。
 
 常用函数：
 
@@ -141,9 +141,9 @@ UART 收发。扫到 `0x10` / `0x11` 后调用 `on_rx`。`0x10` 处理完立刻�
 | 12 | `empty_bed` |
 | 13 | `work_office` |
 
-当前模型第一名只有 `resting_bed`、`sleep_in_night_bed`、`work_office`。只在该类相对该区上一拍变化时出现，帧长仍是 136。7、8、11、12 仍留在表里。新增事件时在 `peer_event_map` 表尾加一行，编号不要复用。线上英文名只从这张表取。
+当前模型第一名只有 `resting_bed`、`sleep_in_night_bed`、`work_office`。只在该类相对该区上一拍变化时出现，帧长是 200。7、8、11、12 仍留在表里。新增事件时在 `peer_event_map` 表尾加一行，编号不要复用。线上英文名只从这张表取。
 
-队列最多 24 条。满了丢掉最新的一条。每条都是完整的 136 字节 `0x20`，一帧 `0x10` 里可以连续发出多条。
+队列最多 24 条。满了丢掉最新的一条。每条都是完整的 200 字节 `0x20`，一帧 `0x10` 里可以连续发出多条。相同 `event_type`、`zone_id`、`env_ch` 在 30 秒内只入队第一条，满 30 秒后的下一条照常入队。
 
 自检可以在 PC 上跑，不烧板：
 
@@ -159,8 +159,9 @@ test_peer_judge.exe
 
 ```text
 gcc -std=c11 -I components/peer_frame/include -I components/peer_event/include -I components/peer_model/include ^
-  components/peer_event/peer_event_map.c components/peer_model/peer_model_window.c ^
-  components/peer_model/test_peer_model_window.c -o test_peer_model_window.exe
+  components/peer_frame/peer_frame.c components/peer_event/peer_event_map.c ^
+  components/peer_model/peer_model_window.c components/peer_model/test_peer_model_window.c ^
+  -o test_peer_model_window.exe
 test_peer_model_window.exe
 ```
 

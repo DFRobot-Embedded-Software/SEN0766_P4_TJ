@@ -8,12 +8,12 @@
  *
  * crc16：Modbus，文档多项式 0x8005，实现用反射 0xA001，初值 0xFFFF。
  *         覆盖从 ver 到 payload 最后一个字节，不含 magic、不含 CRC 本身。
- * len 只计 payload。新旧 0x20 用 len 区分：必须等于 sizeof(peer_event_t)（136），旧 118 丢弃。
+ * len 只计 payload。新旧 0x20 用 len 区分：必须等于 sizeof(peer_event_t)（200），旧 118、136、144 丢弃。
  *
  * msg_type：
  *   0x10 下行瞬时快照 peer_snapshot_t（393）
  *   0x11 下行环境配置 peer_env_cfg_t（26），不要求应答
- *   0x20 上行事件 peer_event_t（136）。P4 主动发，无事件就不发
+ *   0x20 上行事件 peer_event_t（200）。P4 主动发，无事件就不发
  */
 
 #include <stdbool.h>
@@ -102,15 +102,16 @@ typedef struct {
     uint8_t reserved;          /**< 填 0。 */
 } peer_env_cfg_t;
 
-/** 0x20 里带的目标摘要。只留轨迹号和坐标。 */
+/** 0x20 里带的目标摘要。轨迹号、体动名和坐标。 */
 typedef struct {
     uint8_t track_id;
+    char motion[8];            /**< still / micro / slow / fast。分不出档则全 0。 */
     int16_t x_cm;
     int16_t y_cm;
 } peer_event_target_t;
 
 /**
- * 0x20 载荷，136 字节。P4 主动发送。
+ * 0x20 载荷，200 字节。P4 主动发送。
  * env_ch：环境事件写 co2/temp/rh/lux/sound；占用事件全 0。
  * purpose 只放区域用途，不要把通道名塞进来。
  * zone_id!=0 时 targets[] 只留该区；zone_id==0 时留检测范围内全部目标。
@@ -136,12 +137,20 @@ typedef struct {
 #ifdef __cplusplus
 static_assert(sizeof(peer_snapshot_t) == 393, "peer_snapshot_t");
 static_assert(sizeof(peer_env_cfg_t) == 26, "peer_env_cfg_t");
-static_assert(sizeof(peer_event_t) == 136, "peer_event_t");
+static_assert(sizeof(peer_event_target_t) == 13, "peer_event_target_t");
+static_assert(sizeof(peer_event_t) == 200, "peer_event_t");
 #else
 _Static_assert(sizeof(peer_snapshot_t) == 393, "peer_snapshot_t");
 _Static_assert(sizeof(peer_env_cfg_t) == 26, "peer_env_cfg_t");
-_Static_assert(sizeof(peer_event_t) == 136, "peer_event_t");
+_Static_assert(sizeof(peer_event_target_t) == 13, "peer_event_target_t");
+_Static_assert(sizeof(peer_event_t) == 200, "peer_event_t");
 #endif
+
+/**
+ * 把 0x10 的 kinesia 写成 0x20 的体动名，其余字节填 0。
+ * 1 → still，2–30 → micro，31–60 → slow，61–100 → fast。其余 dst[0] 为 0。
+ */
+void peer_motion_name(uint8_t kinesia, char dst[8]);
 
 /** 覆盖 data[0..len)。结果小端放在帧尾。 */
 uint16_t peer_crc16(const uint8_t *data, size_t len);

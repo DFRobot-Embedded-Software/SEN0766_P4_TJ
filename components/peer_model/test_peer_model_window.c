@@ -194,7 +194,9 @@ int main(void)
     peer_model_window_zones(zones, 4);
     peer_event_t ev;
     expect(peer_model_window_event(3, 0, &ev), "first class reports");
-    expect(strcmp(ev.event_type, "resting_bed") == 0 && ev.env_ch[0] == '\0' && ev.zone_id == 3, "event fields");
+    expect(strcmp(ev.event_type, "resting_bed") == 0 && ev.env_ch[0] == '\0' && ev.zone_id == 3 &&
+               ev.target_n == 1 && strcmp(ev.targets[0].motion, "still") == 0,
+           "event fields");
     peer_model_window_event_sent(3, 0);
     expect(!peer_model_window_event(3, 0, &ev), "same class stays quiet");
     expect(!peer_model_window_event(3, 3, &ev), "old 6-class index rejected");

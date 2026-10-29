@@ -2,6 +2,22 @@
 
 #include <string.h>
 
+void peer_motion_name(uint8_t kinesia, char dst[8])
+{
+    const char *name = "";
+    if (kinesia == 1) {
+        name = "still";
+    } else if (kinesia >= 2 && kinesia <= 30) {
+        name = "micro";
+    } else if (kinesia >= 31 && kinesia <= 60) {
+        name = "slow";
+    } else if (kinesia >= 61 && kinesia <= 100) {
+        name = "fast";
+    }
+    memset(dst, 0, 8);
+    memcpy(dst, name, strlen(name));
+}
+
 /**
  * Modbus CRC16。文档写 poly 0x8005，这里按 LSB 先算，用反射多项式 0xA001。
  * 初值 0xFFFF。主机测试向量 "123456789" 的结果为 0x4B37。
