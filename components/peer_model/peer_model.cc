@@ -15,6 +15,14 @@
 
 #include <cstring>
 
+#ifndef PEER_MODEL_AUDIO_DUMP
+#define PEER_MODEL_AUDIO_DUMP 1
+#endif
+
+#if PEER_MODEL_AUDIO_DUMP
+#include "driver/uart.h"
+#endif
+
 static const char *TAG = "peer_model";
 
 /** 模型任务忙大约 1 秒时，50 ms 一帧的快照还能堆在这里。 */
@@ -138,6 +146,68 @@ static void fill_sensor(const peer_model_zone_in_t *z, HamicSensorInput *in)
     in->room = z->room;
 }
 
+#if PEER_MODEL_AUDIO_DUMP
+static bool s_dump_on;
+
+static void dump_init(void)
+{
+    uart_config_t cfg = {};
+    cfg.baud_rate = 921600;
+    cfg.data_bits = UART_DATA_8_BITS;
+    cfg.parity = UART_PARITY_DISABLE;
+    cfg.stop_bits = UART_STOP_BITS_1;
+    cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
+    cfg.source_clk = UART_SCLK_DEFAULT;
+    if (uart_driver_install(UART_NUM_2, 256, 0, 0, NULL, 0) != ESP_OK ||
+        uart_param_config(UART_NUM_2, &cfg) != ESP_OK ||
+        uart_set_pin(UART_NUM_2, GPIO_NUM_24, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE) !=
+            ESP_OK) {
+        ESP_LOGE(TAG, "音频串口初始化失败");
+        return;
+    }
+    s_dump_on = true;
+}
+
+/** 一块 4096 字节约 45 ms。驱动无写超时，整段用 tick 卡 5 秒。 */
+static bool dump_write(const void *src, size_t len, TickType_t t0)
+{
+    const uint8_t *p = static_cast<const uint8_t *>(src);
+    size_t off = 0;
+    while (off < len) {
+        if ((xTaskGetTickCount() - t0) > pdMS_TO_TICKS(5000)) {
+            return false;
+        }
+        size_t n = len - off;
+        if (n > 4096) {
+            n = 4096;
+        }
+        int w = uart_write_bytes(UART_NUM_2, p + off, n);
+        if (w <= 0) {
+            return false;
+        }
+        off += static_cast<size_t>(w);
+    }
+    return true;
+}
+
+static void dump_pcm(const int16_t *pcm)
+{
+    if (!s_dump_on) {
+        return;
+    }
+    uint8_t hdr[12];
+    uint32_t rate = 16000;
+    uint32_t count = AUDIO_SAMPLES;
+    memcpy(hdr, "PCM1", 4);
+    memcpy(hdr + 4, &rate, 4);
+    memcpy(hdr + 8, &count, 4);
+    TickType_t t0 = xTaskGetTickCount();
+    if (!dump_write(hdr, sizeof(hdr), t0) || !dump_write(pcm, AUDIO_SAMPLES * sizeof(int16_t), t0)) {
+        ESP_LOGW(TAG, "音频导出失败");
+    }
+}
+#endif
+
 /**
  * 这一拍先取走满窗的区，再拷声音。
  * 声环不满 10 秒、前端失败或编码器失败：不调用 event，上一拍类别不变。
@@ -153,6 +223,9 @@ static void run_beat(void)
     if (!copy_latest_audio(s_pcm)) {
         return;
     }
+#if PEER_MODEL_AUDIO_DUMP
+    dump_pcm(s_pcm);
+#endif
     hamic_pcm16_to_float(s_pcm, s_audio, AUDIO_SAMPLES);
     if (hamic_frontend_16k(s_audio, AUDIO_SAMPLES, s_mel, s_front, hamic_fft512_portable) != HAMIC_OK) {
         ESP_LOGE(TAG, "声音前端失败，这一拍跳过");
@@ -241,8 +314,8 @@ static void mic_task(void *arg)
         .sda = GPIO_NUM_1,
         .scl = GPIO_NUM_2,
         .mclk = GPIO_NUM_6,
-        .bclk = GPIO_NUM_4,
-        .lrck = GPIO_NUM_5,
+        .bclk = GPIO_NUM_5,
+        .lrck = GPIO_NUM_4,
         .sdo = GPIO_NUM_3,
     };
     while (es7243e_mic_init(&pins) != ESP_OK) {
@@ -270,6 +343,9 @@ extern "C" void peer_model_start(void)
         ESP_LOGE(TAG, "队列或声环申请失败");
         return;
     }
+#if PEER_MODEL_AUDIO_DUMP
+    dump_init();
+#endif
     if (xTaskCreate(mic_task, "peer_mic", 4096, NULL, 5, NULL) != pdPASS ||
         xTaskCreate(model_task, "peer_model", 16384, NULL, 3, &s_model_task) != pdPASS) {
         ESP_LOGE(TAG, "任务创建失败");

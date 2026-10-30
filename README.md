@@ -41,8 +41,9 @@ peer_slave_start(&sink);
 | 业务 TX | GPIO30 | S3 RX |
 | 业务 RX | GPIO29 | S3 TX |
 | 麦 | GPIO1–6 | ES7243E |
+| 音频导出 TX | GPIO24 | USB 转串口 RX，共地 |
 
-业务口默认 `UART_NUM_1`，8N1，无流控，3 Mbps。调试日志走 `UART0` TX（GPIO25），115200，8N1，只出不进。不要把业务口改成 `UART0`。CRC 在短线上频繁失败时，只把 `PEER_UART_BAUD` 改成 `921600`，帧格式不变。业务口引脚和波特率是头文件宏；调试口在 `sdkconfig`。
+业务口默认 `UART_NUM_1`，8N1，无流控，3 Mbps。调试日志走 `UART0` TX（GPIO25），115200，8N1，只出不进。不要把业务口改成 `UART0`。CRC 在短线上频繁失败时，只把 `PEER_UART_BAUD` 改成 `921600`，帧格式不变。业务口引脚和波特率是头文件宏；调试口在 `sdkconfig`。音频导出走 `UART_NUM_2` TX（GPIO24），921600，8N1，只出不进。`PEER_MODEL_AUDIO_DUMP` 在 `peer_model.cc`，默认 1。电脑先 `pip install pyserial`，再执行 `python tools/pcm_dump_wav.py COMx`。
 
 ## peer_frame
 
@@ -187,8 +188,8 @@ static const es7243e_mic_pins_t pins = {
     .sda = GPIO_NUM_1,
     .scl = GPIO_NUM_2,
     .sdo = GPIO_NUM_3,
-    .bclk = GPIO_NUM_4,
-    .lrck = GPIO_NUM_5,
+    .bclk = GPIO_NUM_5,
+    .lrck = GPIO_NUM_4,
     .mclk = GPIO_NUM_6,
 };
 es7243e_mic_init(&pins);
