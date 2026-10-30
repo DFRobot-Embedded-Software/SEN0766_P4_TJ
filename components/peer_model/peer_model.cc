@@ -314,8 +314,8 @@ static void mic_task(void *arg)
         .sda = GPIO_NUM_1,
         .scl = GPIO_NUM_2,
         .mclk = GPIO_NUM_6,
-        .bclk = GPIO_NUM_4,
-        .lrck = GPIO_NUM_5,
+        .bclk = GPIO_NUM_5,
+        .lrck = GPIO_NUM_4,
         .sdo = GPIO_NUM_3,
     };
     while (es7243e_mic_init(&pins) != ESP_OK) {

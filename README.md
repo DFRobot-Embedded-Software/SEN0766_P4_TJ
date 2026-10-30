@@ -188,8 +188,8 @@ static const es7243e_mic_pins_t pins = {
     .sda = GPIO_NUM_1,
     .scl = GPIO_NUM_2,
     .sdo = GPIO_NUM_3,
-    .bclk = GPIO_NUM_4,
-    .lrck = GPIO_NUM_5,
+    .bclk = GPIO_NUM_5,
+    .lrck = GPIO_NUM_4,
     .mclk = GPIO_NUM_6,
 };
 es7243e_mic_init(&pins);
